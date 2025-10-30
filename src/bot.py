@@ -92,15 +92,42 @@ class ArchiveBot:
         user = update.effective_user
         self.db.add_user(user.id, user.username, user.first_name, user.last_name)
         
-        keyboard = [
-            [InlineKeyboardButton("📤 Загрузить файл", callback_data="upload")],
-            [InlineKeyboardButton("🔗 Скачать по ссылке", callback_data="url_download")],
-            [InlineKeyboardButton("📂 Категории", callback_data="categories")],
-            [InlineKeyboardButton("🔍 Поиск файлов", callback_data="search")],
-            [InlineKeyboardButton("📋 Последние файлы", callback_data="recent")],
-            [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
-            [InlineKeyboardButton("👤 Мои файлы", callback_data="my_files")]
-        ]
+        # Get categories for quick access
+        categories = self.db.get_categories()
+        
+        keyboard = []
+        
+        # Quick upload buttons for popular categories
+        keyboard.append([InlineKeyboardButton("⚡ БЫСТРАЯ ЗАГРУЗКА", callback_data="noop")])
+        
+        quick_categories = []
+        for cat_id, name, desc, icon, files_count in categories[:6]:  # Top 6 categories
+            if name in ["Домашние задания", "Конспекты", "Проекты", "Медиа", "Документы", "Архивы"]:
+                quick_categories.append(InlineKeyboardButton(
+                    f"{icon} {name}", 
+                    callback_data=f"quick_upload_{cat_id}"
+                ))
+        
+        # Arrange quick buttons in rows of 2
+        for i in range(0, len(quick_categories), 2):
+            row = quick_categories[i:i+2]
+            keyboard.append(row)
+        
+        # Navigation section
+        keyboard.append([InlineKeyboardButton("🗂️ НАВИГАЦИЯ", callback_data="noop")])
+        keyboard.extend([
+            [InlineKeyboardButton("📂 Все категории", callback_data="categories"), 
+             InlineKeyboardButton("🔍 Поиск файлов", callback_data="search")],
+            [InlineKeyboardButton("📋 Последние файлы", callback_data="recent"), 
+             InlineKeyboardButton("👤 Мои файлы", callback_data="my_files")]
+        ])
+        
+        # Additional options
+        keyboard.append([InlineKeyboardButton("⚙️ ДОПОЛНИТЕЛЬНО", callback_data="noop")])
+        keyboard.extend([
+            [InlineKeyboardButton("🔗 Скачать по ссылке", callback_data="url_download"), 
+             InlineKeyboardButton("📊 Статистика", callback_data="stats")]
+        ])
         
         # Add admin panel for admin user
         if user.id == self.admin_id:
@@ -109,20 +136,25 @@ class ArchiveBot:
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         welcome_text = (
-            "🗃️ **Добро пожаловать в Архив-бот!**\n\n"
-            "Здесь вы можете:\n"
-            "• Загружать файлы ЛЮБЫХ форматов (до 4 ГБ)\n"
-            "• Организовывать файлы по категориям\n"
-            "• Отправлять фото, видео, аудио прямо в чат\n"
-            "• Скачивать файлы по ссылке из любых источников\n"
-            "• Искать и скачивать файлы\n"
-            "• Управлять своими файлами и категориями\n"
-            "• Просматривать статистику архива\n\n"
-            "📂 **Категории:** Домашние задания, Конспекты, Проекты и др.\n"
-            "🔓 **Без ограничений на типы файлов!**\n"
-            "🔒 **Защита от подделок - уникальные имена!**\n\n"
-            "Выберите действие:"
+            "🗃️ **Архив-бот 2.0** - Ваш умный файловый помощник\n\n"
+            "⚡ **Быстрая загрузка** - выберите категорию одним кликом\n"
+            "🗂️ **Умная навигация** - все под рукой\n"
+            "🔍 **Мгновенный поиск** - найдите что угодно\n\n"
+            "📊 **Статистика архива:**\n"
         )
+        
+        # Add archive statistics
+        try:
+            stats = self.db.get_stats()
+            total_files = stats.get('total_files', 0)
+            total_categories = len(categories)
+            
+            welcome_text += (
+                f"📁 Файлов: **{total_files}** • 📂 Категорий: **{total_categories}**\n\n"
+                "🎯 **Выберите действие ниже:**"
+            )
+        except:
+            welcome_text += "🎯 **Выберите действие ниже:**"
         
         await update.message.reply_text(
             welcome_text,
@@ -257,6 +289,14 @@ class ArchiveBot:
             except Exception as e:
                 logger.error(f"Error selecting category: {e}")
                 await query.answer("❌ Ошибка при выборе категории", show_alert=True)
+        elif query.data.startswith("quick_upload_"):
+            try:
+                category_id = int(query.data.split("_")[2])
+                context.user_data['selected_category'] = category_id
+                await self.quick_upload_prompt(query, context, category_id)
+            except Exception as e:
+                logger.error(f"Error with quick upload: {e}")
+                await query.answer("❌ Ошибка при быстрой загрузке", show_alert=True)
         else:
             logger.warning(f"Unknown button data: {query.data}")
     
@@ -295,6 +335,48 @@ class ArchiveBot:
         keyboard = [
             [InlineKeyboardButton("📂 Сменить категорию", callback_data="categories")],
             [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    async def quick_upload_prompt(self, query, context, category_id):
+        """Quick upload prompt for specific category"""
+        category = self.db.get_category_by_id(category_id)
+        
+        if category:
+            category_name = category[1]
+            category_icon = category[3]
+            category_desc = category[2]
+            files_count = category[4]
+        else:
+            category_name = "Общие"
+            category_icon = "📁"
+            category_desc = "Общие файлы"
+            files_count = 0
+        
+        text = (
+            f"⚡ **Быстрая загрузка в категорию**\n\n"
+            f"{category_icon} **{category_name}** ({files_count} файлов)\n"
+            f"💬 _{category_desc}_\n\n"
+            "📤 **Отправьте файл любого формата:**\n"
+            "• 📸 Фото и изображения\n"
+            "• 🎥 Видео файлы\n"
+            "• 📄 Документы и тексты\n"
+            "• 🎵 Аудио и музыка\n"
+            "• 📦 Архивы и программы\n"
+            "• 🔧 Любые другие типы\n\n"
+            "💡 **Максимальный размер:** 4 ГБ"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("📂 Сменить категорию", callback_data="categories")],
+            [InlineKeyboardButton("🗂️ Все категории", callback_data="categories"), 
+             InlineKeyboardButton("◀️ Главное меню", callback_data="back_to_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -1528,29 +1610,69 @@ class ArchiveBot:
     # ===== CATEGORY METHODS =====
     
     async def show_categories(self, query, context):
-        """Show all categories"""
+        """Show all categories with enhanced interface"""
         categories = self.db.get_categories()
         
-        text = "📂 **Категории архива**\n\n"
+        # Calculate total files across all categories
+        total_files = sum(files_count for _, _, _, _, files_count in categories)
+        
+        text = (
+            "📂 **Все категории архива**\n\n"
+            f"📊 **Общая статистика:** {total_files} файлов в {len(categories)} категориях\n\n"
+        )
+        
         keyboard = []
         
+        # Group categories by popularity (files count)
+        popular_categories = []
+        other_categories = []
+        
         for category_id, name, description, icon, files_count in categories:
-            text += f"{icon} **{name}** ({files_count} файлов)\n"
-            if description:
-                text += f"   _{description}_\n"
+            category_info = (category_id, name, description, icon, files_count)
+            if files_count > 0:
+                popular_categories.append(category_info)
+            else:
+                other_categories.append(category_info)
+        
+        # Sort by files count (descending)
+        popular_categories.sort(key=lambda x: x[4], reverse=True)
+        
+        # Show popular categories first
+        if popular_categories:
+            text += "🔥 **Популярные категории:**\n"
+            for category_id, name, description, icon, files_count in popular_categories:
+                text += f"{icon} **{name}** • {files_count} файлов\n"
+                keyboard.append([
+                    InlineKeyboardButton(f"{icon} {name}", callback_data=f"category_{category_id}"),
+                    InlineKeyboardButton(f"📤 Загрузить", callback_data=f"quick_upload_{category_id}")
+                ])
             text += "\n"
+        
+        # Show empty categories
+        if other_categories:
+            text += "📁 **Пустые категории:**\n"
+            empty_buttons = []
+            for category_id, name, description, icon, files_count in other_categories:
+                text += f"{icon} {name}\n"
+                empty_buttons.append(InlineKeyboardButton(
+                    f"{icon} {name}", 
+                    callback_data=f"quick_upload_{category_id}"
+                ))
             
-            keyboard.append([InlineKeyboardButton(
-                f"{icon} {name} ({files_count})", 
-                callback_data=f"category_{category_id}"
-            )])
+            # Arrange empty categories in rows of 2
+            for i in range(0, len(empty_buttons), 2):
+                row = empty_buttons[i:i+2]
+                keyboard.append(row)
+        
+        # Control buttons
+        keyboard.append([InlineKeyboardButton("🔍 Поиск в категориях", callback_data="search_categories")])
         
         # Add admin options for category management
         user_id = query.from_user.id
         if user_id == self.admin_id:
             keyboard.append([InlineKeyboardButton("➕ Создать категорию", callback_data="create_category")])
         
-        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")])
+        keyboard.append([InlineKeyboardButton("◀️ Главное меню", callback_data="back_to_menu")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
@@ -1582,7 +1704,7 @@ class ArchiveBot:
         )
     
     async def show_category_files(self, query, context, category_id, page=1):
-        """Show files in a specific category"""
+        """Show files in a specific category with enhanced interface"""
         category = self.db.get_category_by_id(category_id)
         if not category:
             await query.answer("❌ Категория не найдена", show_alert=True)
@@ -1590,41 +1712,70 @@ class ArchiveBot:
         
         category_name = category[1]
         category_icon = category[3]
+        category_desc = category[2]
         files_count = category[4]
         
-        files = self.db.get_files_by_category(category_id, limit=20)
+        files = self.db.get_files_by_category(category_id, limit=10)
+        
+        # Breadcrumb navigation
+        breadcrumb = f"🏠 Главная > 📂 Категории > {category_icon} {category_name}"
         
         if not files:
-            text = f"{category_icon} **{category_name}**\n\n📭 В этой категории пока нет файлов."
+            text = (
+                f"{breadcrumb}\n\n"
+                f"{category_icon} **{category_name}**\n"
+                f"💬 _{category_desc}_\n\n"
+                "📭 **В этой категории пока нет файлов**\n\n"
+                "💡 Загрузите первый файл в эту категорию!"
+            )
             keyboard = [
-                [InlineKeyboardButton("📤 Загрузить файл", callback_data="upload")],
-                [InlineKeyboardButton("📂 Все категории", callback_data="categories")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
+                [InlineKeyboardButton("📤 Загрузить файл", callback_data=f"quick_upload_{category_id}")],
+                [InlineKeyboardButton("📂 Все категории", callback_data="categories"), 
+                 InlineKeyboardButton("🏠 Главная", callback_data="back_to_menu")]
             ]
         else:
-            text = f"{category_icon} **{category_name}** ({files_count} файлов)\n\n"
+            text = (
+                f"{breadcrumb}\n\n"
+                f"{category_icon} **{category_name}** • {files_count} файлов\n"
+                f"💬 _{category_desc}_\n\n"
+            )
+            
             keyboard = []
             
-            for file_info in files:
+            # Quick actions for category
+            keyboard.append([
+                InlineKeyboardButton("📤 Загрузить", callback_data=f"quick_upload_{category_id}"),
+                InlineKeyboardButton("🔍 Поиск", callback_data=f"search_in_category_{category_id}")
+            ])
+            
+            # File list with enhanced display
+            for i, file_info in enumerate(files, 1):
                 file_id, telegram_file_id, custom_name, description, file_size, uploaded_at, download_count, username, first_name, cat_name, cat_icon = file_info
                 
                 size_str = format_file_size(file_size)
                 uploader = username or first_name or "Неизвестный"
                 
-                text += f"📄 **{custom_name}**\n"
-                text += f"📊 {size_str} • 👤 {uploader} • 📥 {download_count}\n"
+                # File type emoji based on extension
+                file_emoji = self.get_file_emoji(custom_name)
+                
+                text += f"{i}. {file_emoji} **{custom_name}**\n"
+                text += f"   📊 {size_str} • 👤 {uploader} • 📥 {download_count} скачиваний\n"
                 if description:
-                    text += f"💬 _{description}_\n"
+                    text += f"   💬 _{description}_\n"
                 text += "\n"
                 
+                # Enhanced file actions
                 keyboard.append([
                     InlineKeyboardButton("📥 Скачать", callback_data=f"download_{file_id}"),
-                    InlineKeyboardButton("📋 Имя", callback_data=f"copy_name_{file_id}")
+                    InlineKeyboardButton("📋 Копировать", callback_data=f"copy_name_{file_id}"),
+                    InlineKeyboardButton("ℹ️ Инфо", callback_data=f"file_info_{file_id}")
                 ])
             
-            keyboard.append([InlineKeyboardButton("📤 Загрузить в эту категорию", callback_data=f"select_category_{category_id}")])
-            keyboard.append([InlineKeyboardButton("📂 Все категории", callback_data="categories")])
-            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")])
+            # Navigation and actions
+            keyboard.append([
+                InlineKeyboardButton("📂 Все категории", callback_data="categories"), 
+                InlineKeyboardButton("🏠 Главная", callback_data="back_to_menu")
+            ])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -1633,6 +1784,31 @@ class ArchiveBot:
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
+    
+    def get_file_emoji(self, filename):
+        """Get emoji based on file extension"""
+        ext = filename.lower().split('.')[-1] if '.' in filename else ''
+        
+        emoji_map = {
+            # Documents
+            'pdf': '📄', 'doc': '📄', 'docx': '📄', 'txt': '📄', 'rtf': '📄',
+            # Images
+            'jpg': '🖼️', 'jpeg': '🖼️', 'png': '🖼️', 'gif': '🖼️', 'bmp': '🖼️', 'svg': '🖼️',
+            # Videos
+            'mp4': '🎬', 'avi': '🎬', 'mkv': '🎬', 'mov': '🎬', 'wmv': '🎬', 'flv': '🎬',
+            # Audio
+            'mp3': '🎵', 'wav': '🎵', 'flac': '🎵', 'aac': '🎵', 'ogg': '🎵',
+            # Archives
+            'zip': '📦', 'rar': '📦', '7z': '📦', 'tar': '📦', 'gz': '📦',
+            # Code
+            'py': '💻', 'js': '💻', 'html': '💻', 'css': '💻', 'php': '💻', 'java': '💻',
+            # Spreadsheets
+            'xls': '📊', 'xlsx': '📊', 'csv': '📊',
+            # Presentations
+            'ppt': '📽️', 'pptx': '📽️'
+        }
+        
+        return emoji_map.get(ext, '📄')
     
     async def create_category_prompt(self, query, context):
         """Prompt admin to create a new category"""

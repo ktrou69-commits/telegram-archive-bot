@@ -95,7 +95,7 @@ class ArchiveBot:
         keyboard = [
             [InlineKeyboardButton("📤 Загрузить файл", callback_data="upload")],
             [InlineKeyboardButton("🔗 Скачать по ссылке", callback_data="url_download")],
-            [InlineKeyboardButton("📦 Многочастная загрузка", callback_data="multipart_upload")],
+            [InlineKeyboardButton("📂 Категории", callback_data="categories")],
             [InlineKeyboardButton("🔍 Поиск файлов", callback_data="search")],
             [InlineKeyboardButton("📋 Последние файлы", callback_data="recent")],
             [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
@@ -112,12 +112,13 @@ class ArchiveBot:
             "🗃️ **Добро пожаловать в Архив-бот!**\n\n"
             "Здесь вы можете:\n"
             "• Загружать файлы ЛЮБЫХ форматов (до 4 ГБ)\n"
+            "• Организовывать файлы по категориям\n"
             "• Отправлять фото, видео, аудио прямо в чат\n"
             "• Скачивать файлы по ссылке из любых источников\n"
-            "• Загружать большие файлы по частям\n"
             "• Искать и скачивать файлы\n"
-            "• Управлять своими файлами (удалять)\n"
+            "• Управлять своими файлами и категориями\n"
             "• Просматривать статистику архива\n\n"
+            "📂 **Категории:** Домашние задания, Конспекты, Проекты и др.\n"
             "🔓 **Без ограничений на типы файлов!**\n"
             "🔒 **Защита от подделок - уникальные имена!**\n\n"
             "Выберите действие:"
@@ -144,8 +145,8 @@ class ArchiveBot:
             await self.upload_prompt(query, context)
         elif query.data == "url_download":
             await self.url_download_prompt(query, context)
-        elif query.data == "multipart_upload":
-            await self.multipart_upload_prompt(query, context)
+        elif query.data == "categories":
+            await self.show_categories(query, context)
         elif query.data == "search":
             await self.search_prompt(query, context)
         elif query.data == "recent":
@@ -230,13 +231,56 @@ class ArchiveBot:
             except Exception as e:
                 logger.error(f"Error copying filename: {e}")
                 await query.answer("❌ Ошибка при копировании имени", show_alert=True)
+        elif query.data.startswith("category_"):
+            try:
+                category_id = int(query.data.split("_")[1])
+                await self.show_category_files(query, context, category_id)
+            except Exception as e:
+                logger.error(f"Error showing category files: {e}")
+                await query.answer("❌ Ошибка при показе категории", show_alert=True)
+        elif query.data == "create_category":
+            await self.create_category_prompt(query, context)
+        elif query.data.startswith("delete_category_"):
+            try:
+                category_id = int(query.data.split("_")[2])
+                await self.delete_category_confirm(query, context, category_id)
+            except Exception as e:
+                logger.error(f"Error deleting category: {e}")
+                await query.answer("❌ Ошибка при удалении категории", show_alert=True)
+        elif query.data.startswith("select_category_"):
+            try:
+                category_id = int(query.data.split("_")[2])
+                context.user_data['selected_category'] = category_id
+                await query.answer("✅ Категория выбрана!")
+                # Continue with file upload process
+                await self.upload_prompt(query, context)
+            except Exception as e:
+                logger.error(f"Error selecting category: {e}")
+                await query.answer("❌ Ошибка при выборе категории", show_alert=True)
         else:
             logger.warning(f"Unknown button data: {query.data}")
     
     async def upload_prompt(self, query, context):
         """Prompt user to upload a file"""
+        # Check if category is already selected
+        if 'selected_category' not in context.user_data:
+            await self.show_category_selection(query, context, "upload")
+            return
+            
+        # Show category info and upload instructions
+        category_id = context.user_data['selected_category']
+        category = self.db.get_category_by_id(category_id)
+        
+        if category:
+            category_name = category[1]
+            category_icon = category[3]
+        else:
+            category_name = "Общие"
+            category_icon = "📁"
+        
         text = (
-            "📤 **Загрузка файла**\n\n"
+            f"📤 **Загрузка файла в категорию**\n\n"
+            f"📂 **Категория:** {category_icon} {category_name}\n\n"
             "Отправьте файл **ЛЮБОГО ФОРМАТА**, который хотите добавить в архив.\n"
             "Максимальный размер: 4 ГБ\n\n"
             "✅ **Поддерживаются ВСЕ форматы:**\n"
@@ -245,11 +289,13 @@ class ArchiveBot:
             "• 🎵 Аудио и голосовые сообщения\n"
             "• 📄 Документы любых типов\n"
             "• 📦 Архивы, исполняемые файлы (.exe, .bat)\n"
-            "• 🔧 Любые другие типы файлов\n\n"
-            "💡 Для файлов больше 4 ГБ используйте многочастную загрузку"
+            "• 🔧 Любые другие типы файлов"
         )
         
-        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]
+        keyboard = [
+            [InlineKeyboardButton("📂 Сменить категорию", callback_data="categories")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
@@ -289,12 +335,16 @@ class ArchiveBot:
             )
             return
         
+        # Get selected category or default to "Общие"
+        category_id = context.user_data.get('selected_category', 1)
+        
         # Store file info temporarily
         self.user_upload_data[user_id] = {
             'file_id': document.file_id,
             'original_name': document.file_name,
             'file_size': document.file_size,
-            'mime_type': document.mime_type
+            'mime_type': document.mime_type,
+            'category_id': category_id
         }
         
         await update.message.reply_text(
@@ -351,7 +401,8 @@ class ArchiveBot:
             description,
             file_data['file_size'],
             file_data['mime_type'],
-            user_id
+            user_id,
+            category_id=file_data.get('category_id', 1)
         )
         
         # Clean up temporary data
@@ -514,7 +565,8 @@ class ArchiveBot:
             description,
             file_data['file_size'],
             file_data['mime_type'],
-            user_id
+            user_id,
+            category_id=file_data.get('category_id', 1)
         )
         
         # Clean up temporary data
@@ -598,6 +650,11 @@ class ArchiveBot:
         # Handle admin broadcast
         if context.user_data.get('waiting_for_broadcast'):
             await self.handle_broadcast_message(update, context)
+            return
+        
+        # Handle category creation
+        if context.user_data.get('creating_category'):
+            await self.handle_category_creation(update, context)
             return
     
     async def handle_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1467,6 +1524,184 @@ class ArchiveBot:
             logger.info("Antispam data cleanup completed")
         except Exception as e:
             logger.error(f"Error during antispam cleanup: {e}")
+    
+    # ===== CATEGORY METHODS =====
+    
+    async def show_categories(self, query, context):
+        """Show all categories"""
+        categories = self.db.get_categories()
+        
+        text = "📂 **Категории архива**\n\n"
+        keyboard = []
+        
+        for category_id, name, description, icon, files_count in categories:
+            text += f"{icon} **{name}** ({files_count} файлов)\n"
+            if description:
+                text += f"   _{description}_\n"
+            text += "\n"
+            
+            keyboard.append([InlineKeyboardButton(
+                f"{icon} {name} ({files_count})", 
+                callback_data=f"category_{category_id}"
+            )])
+        
+        # Add admin options for category management
+        user_id = query.from_user.id
+        if user_id == self.admin_id:
+            keyboard.append([InlineKeyboardButton("➕ Создать категорию", callback_data="create_category")])
+        
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    async def show_category_selection(self, query, context, action="upload"):
+        """Show category selection for file upload"""
+        categories = self.db.get_categories()
+        
+        text = "📂 **Выберите категорию для файла**\n\n"
+        keyboard = []
+        
+        for category_id, name, description, icon, files_count in categories:
+            keyboard.append([InlineKeyboardButton(
+                f"{icon} {name}", 
+                callback_data=f"select_category_{category_id}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    async def show_category_files(self, query, context, category_id, page=1):
+        """Show files in a specific category"""
+        category = self.db.get_category_by_id(category_id)
+        if not category:
+            await query.answer("❌ Категория не найдена", show_alert=True)
+            return
+        
+        category_name = category[1]
+        category_icon = category[3]
+        files_count = category[4]
+        
+        files = self.db.get_files_by_category(category_id, limit=20)
+        
+        if not files:
+            text = f"{category_icon} **{category_name}**\n\n📭 В этой категории пока нет файлов."
+            keyboard = [
+                [InlineKeyboardButton("📤 Загрузить файл", callback_data="upload")],
+                [InlineKeyboardButton("📂 Все категории", callback_data="categories")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
+            ]
+        else:
+            text = f"{category_icon} **{category_name}** ({files_count} файлов)\n\n"
+            keyboard = []
+            
+            for file_info in files:
+                file_id, telegram_file_id, custom_name, description, file_size, uploaded_at, download_count, username, first_name, cat_name, cat_icon = file_info
+                
+                size_str = format_file_size(file_size)
+                uploader = username or first_name or "Неизвестный"
+                
+                text += f"📄 **{custom_name}**\n"
+                text += f"📊 {size_str} • 👤 {uploader} • 📥 {download_count}\n"
+                if description:
+                    text += f"💬 _{description}_\n"
+                text += "\n"
+                
+                keyboard.append([
+                    InlineKeyboardButton("📥 Скачать", callback_data=f"download_{file_id}"),
+                    InlineKeyboardButton("📋 Имя", callback_data=f"copy_name_{file_id}")
+                ])
+            
+            keyboard.append([InlineKeyboardButton("📤 Загрузить в эту категорию", callback_data=f"select_category_{category_id}")])
+            keyboard.append([InlineKeyboardButton("📂 Все категории", callback_data="categories")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    async def create_category_prompt(self, query, context):
+        """Prompt admin to create a new category"""
+        if query.from_user.id != self.admin_id:
+            await query.answer("❌ Только администратор может создавать категории", show_alert=True)
+            return
+        
+        text = (
+            "➕ **Создание новой категории**\n\n"
+            "Отправьте название новой категории в формате:\n"
+            "`Название | Описание | Эмодзи`\n\n"
+            "**Примеры:**\n"
+            "• `Курсовые работы | Курсовые проекты и работы | 🎓`\n"
+            "• `Фотографии | Личные фото и изображения | 📸`\n"
+            "• `Программы | Исполняемые файлы и программы | 💻`\n\n"
+            "Описание и эмодзи необязательны."
+        )
+        
+        keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="categories")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        context.user_data['creating_category'] = True
+    
+    async def handle_category_creation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle category creation from text input"""
+        if update.effective_user.id != self.admin_id:
+            await update.message.reply_text("❌ Только администратор может создавать категории")
+            return
+        
+        text = update.message.text.strip()
+        parts = [part.strip() for part in text.split('|')]
+        
+        name = parts[0] if len(parts) > 0 else ""
+        description = parts[1] if len(parts) > 1 else ""
+        icon = parts[2] if len(parts) > 2 else "📁"
+        
+        if not name:
+            await update.message.reply_text("❌ Название категории не может быть пустым")
+            return
+        
+        try:
+            category_id = self.db.create_category(name, description, icon, update.effective_user.id)
+            
+            keyboard = [[InlineKeyboardButton("📂 Все категории", callback_data="categories")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"✅ **Категория создана!**\n\n"
+                f"{icon} **{name}**\n"
+                f"📝 {description or 'Без описания'}\n"
+                f"🆔 ID: {category_id}",
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logger.error(f"Error creating category: {e}")
+            await update.message.reply_text(
+                "❌ Ошибка при создании категории. Возможно, категория с таким названием уже существует."
+            )
+        
+        # Clear the flag
+        context.user_data.pop('creating_category', None)
     
     def run(self):
         """Run the bot"""

@@ -13,6 +13,36 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
+            # Create categories table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    icon TEXT DEFAULT '📁',
+                    created_by INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    files_count INTEGER DEFAULT 0
+                )
+            ''')
+            
+            # Create default categories
+            default_categories = [
+                ('Общие', 'Общие файлы', '📁'),
+                ('Домашние задания', 'Учебные задания и работы', '📝'),
+                ('Конспекты', 'Лекции и заметки', '📚'),
+                ('Проекты', 'Рабочие проекты', '💼'),
+                ('Документы', 'Важные документы', '📄'),
+                ('Медиа', 'Фото, видео, аудио', '🎬'),
+                ('Архивы', 'Сжатые файлы и архивы', '📦')
+            ]
+            
+            for name, desc, icon in default_categories:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO categories (name, description, icon, created_by)
+                    VALUES (?, ?, ?, 0)
+                ''', (name, desc, icon))
+            
             # Create files table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS files (
@@ -29,7 +59,9 @@ class DatabaseManager:
                     is_multipart INTEGER DEFAULT 0,
                     part_number INTEGER DEFAULT 1,
                     total_parts INTEGER DEFAULT 1,
-                    multipart_group_id TEXT
+                    multipart_group_id TEXT,
+                    category_id INTEGER DEFAULT 1,
+                    FOREIGN KEY (category_id) REFERENCES categories (id)
                 )
             ''')
             
@@ -51,6 +83,11 @@ class DatabaseManager:
             
             try:
                 cursor.execute('ALTER TABLE files ADD COLUMN multipart_group_id TEXT')
+            except sqlite3.OperationalError:
+                pass
+            
+            try:
+                cursor.execute('ALTER TABLE files ADD COLUMN category_id INTEGER DEFAULT 1')
             except sqlite3.OperationalError:
                 pass
             
@@ -81,23 +118,28 @@ class DatabaseManager:
     def add_file(self, file_id: str, original_name: str, custom_name: str, 
                  description: str, file_size: int, mime_type: str, uploaded_by: int,
                  is_multipart: bool = False, part_number: int = 1, total_parts: int = 1,
-                 multipart_group_id: str = None) -> int:
+                 multipart_group_id: str = None, category_id: int = 1) -> int:
         """Add a new file to the database"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO files (file_id, original_name, custom_name, description, 
                                  file_size, mime_type, uploaded_by, is_multipart,
-                                 part_number, total_parts, multipart_group_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 part_number, total_parts, multipart_group_id, category_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (file_id, original_name, custom_name, description, file_size, mime_type, 
-                  uploaded_by, int(is_multipart), part_number, total_parts, multipart_group_id))
+                  uploaded_by, int(is_multipart), part_number, total_parts, multipart_group_id, category_id))
             
             # Update user's file count only for single files or first part of multipart
             if not is_multipart or part_number == 1:
                 cursor.execute('''
                     UPDATE users SET files_uploaded = files_uploaded + 1 WHERE user_id = ?
                 ''', (uploaded_by,))
+                
+                # Update category files count
+                cursor.execute('''
+                    UPDATE categories SET files_count = files_count + 1 WHERE id = ?
+                ''', (category_id,))
             
             conn.commit()
             return cursor.lastrowid
@@ -420,3 +462,96 @@ class DatabaseManager:
                 WHERE id = ?
             ''', (file_id,))
             return cursor.fetchone()
+    
+    # ===== CATEGORY METHODS =====
+    
+    def get_categories(self) -> List[Tuple]:
+        """Get all categories"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, name, description, icon, files_count
+                FROM categories
+                ORDER BY name
+            ''')
+            return cursor.fetchall()
+    
+    def get_category_by_id(self, category_id: int) -> Optional[Tuple]:
+        """Get category by ID"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, name, description, icon, files_count
+                FROM categories
+                WHERE id = ?
+            ''', (category_id,))
+            return cursor.fetchone()
+    
+    def create_category(self, name: str, description: str, icon: str, created_by: int) -> int:
+        """Create a new category"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO categories (name, description, icon, created_by)
+                VALUES (?, ?, ?, ?)
+            ''', (name, description, icon, created_by))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def delete_category(self, category_id: int, move_to_category_id: int = 1):
+        """Delete category and move files to another category"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Move files to another category
+            cursor.execute('''
+                UPDATE files SET category_id = ? WHERE category_id = ?
+            ''', (move_to_category_id, category_id))
+            
+            # Update files count for destination category
+            cursor.execute('''
+                SELECT COUNT(*) FROM files WHERE category_id = ?
+            ''', (category_id,))
+            files_count = cursor.fetchone()[0]
+            
+            cursor.execute('''
+                UPDATE categories SET files_count = files_count + ? WHERE id = ?
+            ''', (files_count, move_to_category_id))
+            
+            # Delete category
+            cursor.execute('DELETE FROM categories WHERE id = ?', (category_id,))
+            conn.commit()
+    
+    def get_files_by_category(self, category_id: int, limit: int = 10) -> List[Tuple]:
+        """Get files by category"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT f.id, f.file_id, f.custom_name, f.description, f.file_size, 
+                       f.uploaded_at, f.download_count, u.username, u.first_name,
+                       c.name as category_name, c.icon as category_icon
+                FROM files f
+                LEFT JOIN users u ON f.uploaded_by = u.user_id
+                LEFT JOIN categories c ON f.category_id = c.id
+                WHERE f.category_id = ?
+                ORDER BY f.uploaded_at DESC
+                LIMIT ?
+            ''', (category_id, limit))
+            return cursor.fetchall()
+    
+    def search_files_in_category(self, query: str, category_id: int, limit: int = 10) -> List[Tuple]:
+        """Search files within a specific category"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT f.id, f.file_id, f.custom_name, f.description, f.file_size, 
+                       f.uploaded_at, f.download_count, u.username, u.first_name,
+                       c.name as category_name, c.icon as category_icon
+                FROM files f
+                LEFT JOIN users u ON f.uploaded_by = u.user_id
+                LEFT JOIN categories c ON f.category_id = c.id
+                WHERE f.category_id = ? AND (f.custom_name LIKE ? OR f.description LIKE ?)
+                ORDER BY f.uploaded_at DESC
+                LIMIT ?
+            ''', (category_id, f'%{query}%', f'%{query}%', limit))
+            return cursor.fetchall()

@@ -1115,14 +1115,12 @@ class ArchiveBot:
         )
     
     async def back_to_menu(self, query, context):
-        """Return to main menu"""
+        """Return to main menu - minimal interface"""
+        # Minimal keyboard - only 4 essential buttons
         keyboard = [
-            [InlineKeyboardButton("📤 Загрузить файл", callback_data="upload")],
-            [InlineKeyboardButton("🔗 Скачать по ссылке", callback_data="url_download")],
-            [InlineKeyboardButton("📦 Многочастная загрузка", callback_data="multipart_upload")],
-            [InlineKeyboardButton("🔍 Поиск файлов", callback_data="search")],
-            [InlineKeyboardButton("📋 Последние файлы", callback_data="recent")],
-            [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+            [InlineKeyboardButton("📤 Загрузить", callback_data="upload")],
+            [InlineKeyboardButton("📂 Категории", callback_data="categories")],
+            [InlineKeyboardButton("🔍 Поиск", callback_data="search")],
             [InlineKeyboardButton("👤 Мои файлы", callback_data="my_files")]
         ]
         
@@ -1132,10 +1130,25 @@ class ArchiveBot:
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        welcome_text = (
-            "🗃️ **Архив-бот**\n\n"
-            "Выберите действие:"
-        )
+        # Get simple statistics
+        try:
+            stats = self.db.get_stats()
+            total_files = stats.get('total_files', 0)
+            welcome_text = (
+                f"🗃️ **Архив-бот** • {total_files} файлов\n\n"
+                "📤 **Загрузить** - добавить файл\n"
+                "📂 **Категории** - организация файлов\n"
+                "🔍 **Поиск** - найти файл\n"
+                "👤 **Мои файлы** - управление"
+            )
+        except:
+            welcome_text = (
+                "🗃️ **Архив-бот**\n\n"
+                "📤 **Загрузить** - добавить файл\n"
+                "📂 **Категории** - организация файлов\n"
+                "🔍 **Поиск** - найти файл\n"
+                "👤 **Мои файлы** - управление"
+            )
         
         await query.edit_message_text(
             welcome_text,
